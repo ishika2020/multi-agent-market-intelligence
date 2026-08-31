@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+market_reports/
+*.db
+.pytest_cache/
