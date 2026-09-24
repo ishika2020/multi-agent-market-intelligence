@@ -14,7 +14,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 from agentic_market_intel.data import build_dataset, build_live_dataset
-from agentic_market_intel.db import Report, SessionLocal, init_db
+from agentic_market_intel.db import AgentCall, Report, Run, SessionLocal, init_db
 from agentic_market_intel.pipeline import run_pipeline
 from agentic_market_intel.scheduler import start_scheduler
 
@@ -55,6 +55,47 @@ def trigger_run(req: RunRequest):
         return run_pipeline(df, req.company)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/runs/{run_id}")
+def get_run(run_id: int):
+    """Run metadata plus the per-agent latency/token/success breakdown —
+    the observability story: every node execution is one queryable row."""
+    session = SessionLocal()
+    try:
+        run = session.get(Run, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        calls = (
+            session.query(AgentCall)
+            .filter(AgentCall.run_id == run_id)
+            .order_by(AgentCall.started_at.asc())
+            .all()
+        )
+        return {
+            "id": run.id,
+            "company": run.company,
+            "mode": run.mode,
+            "status": run.status,
+            "critic_approved": run.critic_approved,
+            "revise_count": run.revise_count,
+            "alert": run.alert,
+            "duration_seconds": run.duration_seconds,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "agent_calls": [
+                {
+                    "node_name": c.node_name,
+                    "latency_seconds": c.latency_seconds,
+                    "tokens_total": c.tokens_total,
+                    "success": c.success,
+                    "error": c.error,
+                }
+                for c in calls
+            ],
+        }
+    finally:
+        session.close()
 
 
 @app.get("/reports/{report_id}")

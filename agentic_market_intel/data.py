@@ -10,6 +10,13 @@ from datetime import date, timedelta
 
 import pandas as pd
 import requests
+import yfinance as yf
+
+COMPANY_TICKERS = {
+    "tesla": "TSLA", "apple": "AAPL", "amazon": "AMZN", "google": "GOOGL",
+    "alphabet": "GOOGL", "microsoft": "MSFT", "meta": "META", "facebook": "META",
+    "nvidia": "NVDA", "netflix": "NFLX", "intel": "INTC", "amd": "AMD",
+}
 from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -179,3 +186,36 @@ def build_live_dataset(companies: list[str], news_api_key: str | None) -> pd.Dat
     df = preprocess_dataframe(raw)
     df = compute_sentiment_scores(df)
     return df
+
+
+def fetch_price_trend(company: str, period: str = "1mo") -> dict:
+    """Price/volume trend for a company via yfinance, to correlate against
+    news sentiment. Free, no API key required. Returns an error dict (not an
+    exception) for unmapped companies or network failures, so the calling
+    tool can hand that back to the agent as data rather than crashing."""
+    ticker_symbol = COMPANY_TICKERS.get(company.strip().lower())
+    if not ticker_symbol:
+        return {"error": f"No ticker mapping for '{company}'. Known: {sorted(COMPANY_TICKERS)}"}
+
+    try:
+        hist = yf.Ticker(ticker_symbol).history(period=period)
+    except Exception as e:
+        return {"error": f"yfinance fetch failed for {ticker_symbol}: {e}"}
+
+    hist = hist.dropna(subset=["Close"])
+    if hist.empty:
+        return {"error": f"No usable price data returned for {ticker_symbol}"}
+
+    start_price = float(hist["Close"].iloc[0])
+    end_price = float(hist["Close"].iloc[-1])
+    pct_change = round((end_price - start_price) / start_price * 100, 2)
+
+    return {
+        "ticker": ticker_symbol,
+        "period": period,
+        "start_price": round(start_price, 2),
+        "end_price": round(end_price, 2),
+        "pct_change": pct_change,
+        "avg_volume": int(hist["Volume"].mean()),
+        "price_trend": "Up" if pct_change > 1 else ("Down" if pct_change < -1 else "Flat"),
+    }

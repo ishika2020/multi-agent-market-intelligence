@@ -14,6 +14,8 @@ from collections import Counter
 import pandas as pd
 from langchain_core.tools import tool
 
+from agentic_market_intel.data import fetch_price_trend
+
 
 def _subset_for(df: pd.DataFrame, company: str) -> pd.DataFrame:
     subset = df[df["company"].str.lower() == company.strip().lower()]
@@ -112,9 +114,20 @@ def build_tools(df: pd.DataFrame) -> dict:
         missing = [i for i in ids if i not in found]
         return json.dumps({"records": records.to_dict(orient="records"), "missing_ids": missing}, indent=2)
 
+    @tool
+    def market_data(company: str) -> str:
+        """Get recent stock price/volume trend for a company from yfinance,
+        to correlate against news sentiment (e.g. does sentiment match price
+        direction?). Input: company name. Returns JSON with price_trend,
+        pct_change, and avg_volume, or an error if the company has no known
+        ticker or the market data fetch failed — treat that as 'unavailable',
+        not as evidence of anything."""
+        return json.dumps(fetch_price_trend(company), indent=2)
+
     return {
         "fetch": fetch_company_data,
         "sentiment": analyze_sentiment,
         "trend": detect_trends,
         "lookup_evidence": lookup_evidence,
+        "market_data": market_data,
     }

@@ -27,10 +27,10 @@ def run_pipeline(df: pd.DataFrame, company: str) -> dict:
     try:
         if mode == "live":
             from agentic_market_intel.graph import run_for_company
-            state = run_for_company(df, get_llm(), company)
+            state = run_for_company(df, get_llm(), company, run_id=run.id)
         else:
             from agentic_market_intel.mock import run_mock_pipeline
-            state = run_mock_pipeline(df, company)
+            state = run_mock_pipeline(df, company, run_id=run.id)
 
         critic_approved = bool(state["critic_verdict"].approved)
 

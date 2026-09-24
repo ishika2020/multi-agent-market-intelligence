@@ -29,6 +29,7 @@ class CriticVerdict(BaseModel):
 
 class GraphState(TypedDict, total=False):
     company: str
+    run_id: int
     research_summary: str
     analysis_summary: str
     sentiment_json: str

@@ -23,6 +23,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 
 from agentic_market_intel.llm import invoke_with_retry
+from agentic_market_intel.observability import log_agent_call
 from agentic_market_intel.report import format_report
 from agentic_market_intel.state import CriticVerdict, GraphState, InsightsOutput
 from agentic_market_intel.tools import build_tools
@@ -47,12 +48,16 @@ def build_graph(df: pd.DataFrame, llm):
 
     analysis_agent = create_react_agent(
         llm,
-        tools=[tools["sentiment"], tools["trend"]],
+        tools=[tools["sentiment"], tools["trend"], tools["market_data"]],
         prompt=(
             "You are a quantitative sentiment and trend analyst. Given a company name, "
-            "decide which of the available tools you need (you may need one or both) "
-            "to produce: overall sentiment score and distribution, trend direction, "
-            "top keywords, and any risk flag. Summarize findings in 3-5 sentences, "
+            "decide which of the available tools you need (sentiment, trend, and/or "
+            "market_data) to produce: overall sentiment score and distribution, trend "
+            "direction, top keywords, any risk flag, and — if market_data is available "
+            "for this company — whether the stock price trend agrees or diverges from "
+            "the sentiment trend (a divergence is itself worth flagging). If market_data "
+            "returns an error, note that price correlation was unavailable and move on; "
+            "do not treat it as a data point. Summarize findings in 3-5 sentences, "
             "explicitly citing the numbers you found."
         ),
     )
@@ -82,15 +87,19 @@ def build_graph(df: pd.DataFrame, llm):
     insight_extractor = llm.with_structured_output(InsightsOutput)
 
     def research_node(state: GraphState) -> dict:
-        result = invoke_with_retry(research_agent.invoke, {
-            "messages": [("user", f"Research company: {state['company']}")]
-        })
+        with log_agent_call(state.get("run_id"), "research") as ctx:
+            result = invoke_with_retry(research_agent.invoke, {
+                "messages": [("user", f"Research company: {state['company']}")]
+            })
+            ctx["messages"] = result["messages"]
         return {"research_summary": result["messages"][-1].content}
 
     def analysis_node(state: GraphState) -> dict:
-        result = invoke_with_retry(analysis_agent.invoke, {
-            "messages": [("user", f"Analyze sentiment and trends for: {state['company']}")]
-        })
+        with log_agent_call(state.get("run_id"), "analysis") as ctx:
+            result = invoke_with_retry(analysis_agent.invoke, {
+                "messages": [("user", f"Analyze sentiment and trends for: {state['company']}")]
+            })
+            ctx["messages"] = result["messages"]
         return {"analysis_summary": result["messages"][-1].content}
 
     def insight_node(state: GraphState) -> dict:
@@ -108,16 +117,18 @@ def build_graph(df: pd.DataFrame, llm):
                 f"Revise your claims to fix these specific issues.\n"
             )
 
-        result = invoke_with_retry(insight_agent.invoke, {"messages": [("user", prompt)]})
-        raw_answer = result["messages"][-1].content
+        with log_agent_call(state.get("run_id"), "insight") as ctx:
+            result = invoke_with_retry(insight_agent.invoke, {"messages": [("user", prompt)]})
+            raw_answer = result["messages"][-1].content
 
-        insights: InsightsOutput = invoke_with_retry(
-            insight_extractor.invoke,
-            "Extract the business claims from the analysis below into the required schema. "
-            "Preserve every evidence_id exactly as written (format EVID-XXXX). Do not add or "
-            "drop claims.\n\n"
-            f"{raw_answer}"
-        )
+            insights: InsightsOutput = invoke_with_retry(
+                insight_extractor.invoke,
+                "Extract the business claims from the analysis below into the required schema. "
+                "Preserve every evidence_id exactly as written (format EVID-XXXX). Do not add or "
+                "drop claims.\n\n"
+                f"{raw_answer}"
+            )
+            ctx["messages"] = result["messages"]
         return {"insights": insights}
 
     def critic_node(state: GraphState) -> dict:
@@ -131,15 +142,16 @@ def build_graph(df: pd.DataFrame, llm):
         )
 
         critic_llm = llm.with_structured_output(CriticVerdict)
-        verdict: CriticVerdict = invoke_with_retry(
-            critic_llm.invoke,
-            "You are a skeptical QA reviewer. Verify each claim below against the actual "
-            "evidence text. Reject (approved=false) if: a claim cites no evidence_id, cites "
-            "an evidence_id that is missing from the lookup, or the evidence text does not "
-            "actually support the claim. Be strict — this report will be read unattended.\n\n"
-            f"CLAIMS:\n{claims_text}\n\n"
-            f"EVIDENCE LOOKUP RESULT:\n{evidence_json}"
-        )
+        with log_agent_call(state.get("run_id"), "critic"):
+            verdict: CriticVerdict = invoke_with_retry(
+                critic_llm.invoke,
+                "You are a skeptical QA reviewer. Verify each claim below against the actual "
+                "evidence text. Reject (approved=false) if: a claim cites no evidence_id, cites "
+                "an evidence_id that is missing from the lookup, or the evidence text does not "
+                "actually support the claim. Be strict — this report will be read unattended.\n\n"
+                f"CLAIMS:\n{claims_text}\n\n"
+                f"EVIDENCE LOOKUP RESULT:\n{evidence_json}"
+            )
         return {"critic_verdict": verdict, "revise_count": state.get("revise_count", 0) + (0 if verdict.approved else 1)}
 
     def route_after_critic(state: GraphState) -> str:
@@ -170,7 +182,7 @@ def build_graph(df: pd.DataFrame, llm):
     return graph.compile()
 
 
-def run_for_company(df: pd.DataFrame, llm, company: str) -> GraphState:
+def run_for_company(df: pd.DataFrame, llm, company: str, run_id: int | None = None) -> GraphState:
     app = build_graph(df, llm)
-    final_state = app.invoke({"company": company, "revise_count": 0})
+    final_state = app.invoke({"company": company, "revise_count": 0, "run_id": run_id})
     return final_state
